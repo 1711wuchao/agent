@@ -1,0 +1,99 @@
+services:
+  mysql:
+    image: mysql:8.4
+    container_name: contract-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: contract_root_password
+      MYSQL_DATABASE: contract_agent
+      MYSQL_USER: contract_user
+      MYSQL_PASSWORD: contract_password
+      TZ: Asia/Shanghai
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./backend/src/main/resources/db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-pcontract_root_password"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7.4-alpine
+    container_name: contract-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  chroma:
+    image: chromadb/chroma:latest
+    container_name: contract-chroma
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      IS_PERSISTENT: "TRUE"
+      PERSIST_DIRECTORY: /chroma/chroma
+      ANONYMIZED_TELEMETRY: "FALSE"
+      TZ: Asia/Shanghai
+    volumes:
+      - ./chroma-data:/chroma/chroma
+
+  backend:
+    build:
+      context: ./backend
+    container_name: contract-backend
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      chroma:
+        condition: service_started
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      MYSQL_HOST: mysql
+      MYSQL_PORT: 3306
+      MYSQL_DATABASE: contract_agent
+      MYSQL_USER: contract_user
+      MYSQL_PASSWORD: contract_password
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      CHROMA_URL: http://chroma:8000
+      CONTRACT_TEMPLATE_ROOT: /app/templates
+      CONTRACT_OUTPUT_ROOT: /app/storage/contracts
+      KIMI_API_BASE: https://api.moonshot.cn/v1
+      KIMI_API_KEY: ${KIMI_API_KEY:-}
+      KIMI_MODEL: moonshot-v1-8k
+      KIMI_TIMEOUT_MS: 30000
+      TZ: Asia/Shanghai
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./templates:/app/templates
+      - contract_files:/app/storage
+
+  frontend:
+    build:
+      context: ./frontend
+    container_name: contract-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "5173:80"
+
+volumes:
+  mysql_data:
+  redis_data:
+  contract_files:

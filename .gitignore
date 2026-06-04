@@ -1,0 +1,15 @@
+node_modules/
+dist/
+target/
+frontend-dist.tar.gz
+storage/
+chroma-data/
+.venv-chroma/
+.idea/
+.vscode/
+logs/
+ocr_slices/
+.env
+.env.*
+*.log
+*.tmp

@@ -1,0 +1,27 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: contract-agent
+  datasource:
+    url: jdbc:mysql://${MYSQL_HOST:localhost}:${MYSQL_PORT:3306}/${MYSQL_DATABASE:contract_agent}?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai
+    username: ${MYSQL_USER:root}
+    password: ${MYSQL_PASSWORD:}
+  data:
+    redis:
+      host: localhost
+      port: 6379
+
+contract:
+  template-root: ../templates
+  output-root: ./storage/contracts
+  vector-store: chroma
+  chroma:
+    url: http://localhost:8000
+
+kimi:
+  api-base: https://api.moonshot.cn/v1
+  model: moonshot-v1-8k
+  api-key: ${KIMI_API_KEY:}
+  timeout-ms: 30000
