@@ -133,6 +133,23 @@ body {
   width: 100%;
 }
 
+.batch-options {
+  margin-top: 16px;
+}
+
+.field-label {
+  margin-bottom: 8px;
+  color: #374151;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.batch-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 12px;
+}
+
 .batch-summary {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

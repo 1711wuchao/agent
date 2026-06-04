@@ -78,11 +78,21 @@ export function getContractsByDate(date) {
   return http.get(`/contract-numbers/date/${date}`)
 }
 
-export function uploadBatchExcel(file) {
+export function uploadBatchExcel(file, requirements = '') {
   const formData = new FormData()
   formData.append('file', file)
+  if (requirements && requirements.trim()) {
+    formData.append('requirements', requirements.trim())
+  }
   return http.post('/contracts/batch/excel', formData, {
     headers: { 'Content-Type': 'multipart/form-data' },
+    timeout: 120000
+  })
+}
+
+export function downloadBatchDocx(contractIds) {
+  return http.post('/contracts/batch/download-docx', { contractIds }, {
+    responseType: 'blob',
     timeout: 120000
   })
 }

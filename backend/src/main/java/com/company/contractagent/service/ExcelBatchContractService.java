@@ -16,23 +16,30 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
 
 @Service
 public class ExcelBatchContractService {
@@ -48,17 +55,23 @@ public class ExcelBatchContractService {
     }
 
     public Map<String, Object> generateFromExcel(MultipartFile file) {
+        return generateFromExcel(file, null);
+    }
+
+    public Map<String, Object> generateFromExcel(MultipartFile file, String requirements) {
         List<InvoiceLine> lines = readInvoiceLines(file);
+        String direction = inferContractDirection(file.getOriginalFilename(), requirements);
         Map<String, List<InvoiceLine>> groups = lines.stream()
                 .collect(Collectors.groupingBy(InvoiceLine::groupKey, LinkedHashMap::new, Collectors.toList()));
 
         List<Map<String, Object>> results = new ArrayList<>();
         for (List<InvoiceLine> groupLines : groups.values()) {
-            Map<String, Object> fields = buildFields(groupLines);
-            boolean tech = groupLines.stream().anyMatch(line -> isTechProduct(line.productName()));
+            Map<String, Object> fields = buildFields(groupLines, requirements, direction);
+            boolean zhongcheng = isZhongchengGroup(groupLines);
+            boolean tech = direction.isBlank() && hasTechProduct(groupLines);
             String templateCode = tech ? "TECH_DEVELOPMENT" : "PURCHASE";
             String contractType = tech ? "技术开发合同" : "产品购销合同";
-            String title = groupLines.get(0).buyer() + "与" + groupLines.get(0).seller() + contractType;
+            String title = contractTitle(groupLines.get(0), contractType, direction);
 
             ContractDraft draft = contractService.createDraft(new CreateContractDraftRequest(
                     contractType,
@@ -72,7 +85,7 @@ public class ExcelBatchContractService {
                     "contractType", contractType,
                     "seller", groupLines.get(0).seller(),
                     "buyer", groupLines.get(0).buyer(),
-                    "invoiceDate", groupLines.get(0).invoiceDate().toString(),
+                    "invoiceDate", invoiceDateText(groupLines),
                     "lineCount", groupLines.size(),
                     "amount", fields.get("amount"),
                     "fileName", docx.get("fileName"),
@@ -86,6 +99,31 @@ public class ExcelBatchContractService {
                 "contractCount", results.size(),
                 "contracts", results
         );
+    }
+
+    public byte[] downloadDocxZip(List<String> contractIds) {
+        if (contractIds == null || contractIds.isEmpty()) {
+            throw new IllegalArgumentException("请选择需要批量下载的合同");
+        }
+        String folderName = "contracts-" + LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMddHHmmss"));
+        Set<String> usedNames = new HashSet<>();
+        try (ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
+             ZipOutputStream zipOutputStream = new ZipOutputStream(outputStream)) {
+            for (String contractId : contractIds) {
+                if (contractId == null || contractId.isBlank()) {
+                    continue;
+                }
+                Path docx = contractService.requireGeneratedFile(contractId.trim(), "DOCX");
+                String entryName = uniqueZipName(usedNames, folderName + "/" + safeZipFileName(docx.getFileName().toString()));
+                zipOutputStream.putNextEntry(new ZipEntry(entryName));
+                Files.copy(docx, zipOutputStream);
+                zipOutputStream.closeEntry();
+            }
+            zipOutputStream.finish();
+            return outputStream.toByteArray();
+        } catch (IOException exception) {
+            throw new IllegalArgumentException("批量打包 Word 失败：" + exception.getMessage(), exception);
+        }
     }
 
     private List<InvoiceLine> readInvoiceLines(MultipartFile file) {
@@ -132,7 +170,7 @@ public class ExcelBatchContractService {
         }
     }
 
-    private Map<String, Object> buildFields(List<InvoiceLine> lines) {
+    private Map<String, Object> buildFields(List<InvoiceLine> lines, String requirements, String direction) {
         InvoiceLine first = lines.get(0);
         BigDecimal total = lines.stream()
                 .map(InvoiceLine::amount)
@@ -147,12 +185,28 @@ public class ExcelBatchContractService {
         Map<String, Object> fields = new LinkedHashMap<>();
         fields.put("partyA", first.buyer());
         fields.put("partyB", first.seller());
+        fields.put("buyer", first.buyer());
+        fields.put("seller", first.seller());
+        if (!direction.isBlank()) {
+            fields.put("contractDirection", direction);
+            fields.put("contractDirectionLabel", direction + "合同");
+        }
         fields.put("productName", items.size() == 1 ? items.get(0).get("productName") : "多项合同标的");
         fields.put("specification", items.size() == 1 ? items.get(0).get("specification") : "详见合同标的表");
         fields.put("quantity", items.size() == 1 ? items.get(0).get("quantity") : "详见合同标的表");
         fields.put("taxRate", commonTaxRate(lines));
         fields.put("amount", totalText(total));
         fields.put("invoiceDate", first.invoiceDate().toString());
+        fields.put("invoiceMonth", first.invoiceDate().format(DateTimeFormatter.ofPattern("yyyy-MM")));
+        fields.put("invoiceDateRange", invoiceDateText(lines));
+        fields.put("containsTechnicalProduct", hasTechProduct(lines));
+        if (requirements != null && !requirements.isBlank()) {
+            fields.put("customRequirements", requirements.trim());
+        }
+        if (!direction.isBlank() || (isZhongchengGroup(lines) && !hasTechProduct(lines))) {
+            fields.put("contractDate", ContractDocumentService.zhongchengSigningDate(first.invoiceDate()).toString());
+            fields.put("signingPlace", "苏州市吴江区");
+        }
         fields.put("rawItemsJson", toJson(rawItems));
         fields.put("itemsJson", toJson(items));
         fields.put("technicalGoal", TechContractDefaults.technicalGoal(null));
@@ -227,8 +281,8 @@ public class ExcelBatchContractService {
         Map<String, Object> item = new LinkedHashMap<>();
         item.put("productName", cleanProductName(line.productName()));
         item.put("specification", blankDefault(line.specification(), "按双方确认规格执行"));
-        item.put("unit", blankDefault(line.unit(), ""));
-        item.put("quantity", line.quantity());
+        item.put("unit", normalizeOptionalCell(line.unit()));
+        item.put("quantity", quantityDisplayText(line.quantity(), line.unit()));
         item.put("taxRate", blankDefault(line.taxRate(), "13%"));
         item.put("amount", totalText(line.amount()));
         return item;
@@ -250,14 +304,58 @@ public class ExcelBatchContractService {
         }
 
         return merged.values().stream()
-                .filter(item -> item.quantity.compareTo(BigDecimal.ZERO) > 0)
-                .filter(item -> item.amount.compareTo(BigDecimal.ZERO) > 0)
                 .map(MergedItem::toContractItem)
                 .toList();
     }
 
     private static boolean isTechProduct(String productName) {
         return productName.contains("站点") || productName.contains("软件") || productName.contains("算法");
+    }
+
+    private static String inferContractDirection(String fileName, String requirements) {
+        String text = (fileName == null ? "" : fileName) + " " + (requirements == null ? "" : requirements);
+        if (text.contains("销项")) {
+            return "销项";
+        }
+        if (text.contains("进项")) {
+            return "进项";
+        }
+        return "";
+    }
+
+    private static String contractTitle(InvoiceLine first, String contractType, String direction) {
+        if (!direction.isBlank()) {
+            return direction + "合同_" + first.seller() + "_" + first.buyer();
+        }
+        return first.buyer() + "与" + first.seller() + contractType;
+    }
+
+    private static boolean hasTechProduct(List<InvoiceLine> lines) {
+        return lines.stream().anyMatch(line -> isTechProduct(line.productName()));
+    }
+
+    private static String invoiceDateText(List<InvoiceLine> lines) {
+        List<LocalDate> dates = lines.stream()
+                .map(InvoiceLine::invoiceDate)
+                .filter(Objects::nonNull)
+                .distinct()
+                .sorted()
+                .toList();
+        if (dates.isEmpty()) {
+            return "";
+        }
+        if (dates.size() == 1) {
+            return dates.get(0).toString();
+        }
+        return dates.get(0) + " 至 " + dates.get(dates.size() - 1);
+    }
+
+    private static boolean isZhongchengGroup(List<InvoiceLine> lines) {
+        return lines.stream().anyMatch(line -> containsZhongcheng(line.seller()) || containsZhongcheng(line.buyer()));
+    }
+
+    private static boolean containsZhongcheng(String value) {
+        return value != null && value.contains("中城");
     }
 
     private static String cleanProductName(String value) {
@@ -268,17 +366,26 @@ public class ExcelBatchContractService {
     }
 
     private static String commonTaxRate(List<InvoiceLine> lines) {
-        return lines.stream()
+        List<String> taxRates = lines.stream()
                 .map(InvoiceLine::taxRate)
                 .filter(value -> value != null && !value.isBlank())
                 .distinct()
                 .limit(2)
-                .toList()
-                .size() == 1 ? lines.get(0).taxRate() : "详见合同标的表";
+                .toList();
+        return taxRates.size() == 1 ? taxRates.get(0) : "详见合同标的表";
     }
 
     private static String blankDefault(String value, String fallback) {
-        return value == null || value.isBlank() ? fallback : value;
+        String normalized = normalizeOptionalCell(value);
+        return normalized.isBlank() ? fallback : normalized;
+    }
+
+    private static String normalizeOptionalCell(String value) {
+        if (value == null) {
+            return "";
+        }
+        String text = value.trim();
+        return "/".equals(text) || "-".equals(text) || "--".equals(text) ? "" : text;
     }
 
     private String toJson(Object value) {
@@ -301,7 +408,7 @@ public class ExcelBatchContractService {
             BigDecimal amount
     ) {
         private String groupKey() {
-            return seller + "|" + buyer + "|" + invoiceDate;
+            return seller + "|" + buyer + "|" + invoiceDate.getYear() + "-" + String.format("%02d", invoiceDate.getMonthValue());
         }
     }
 
@@ -312,6 +419,7 @@ public class ExcelBatchContractService {
         private final String taxRate;
         private BigDecimal quantity = BigDecimal.ZERO;
         private BigDecimal amount = BigDecimal.ZERO;
+        private boolean hasPositiveQuantity;
 
         private MergedItem(String productName, String specification, String unit, String taxRate) {
             this.productName = productName;
@@ -329,7 +437,11 @@ public class ExcelBatchContractService {
             if (!taxRate.equals(currentTaxRate)) {
                 log.warn("同一产品规格的税率不一致，按首次税率处理，并按金额汇总。产品：{}，规格：{}，首次税率：{}，当前税率：{}", productName, specification, taxRate, currentTaxRate);
             }
-            quantity = quantity.add(quantity(line.quantity()));
+            BigDecimal currentQuantity = quantity(line.quantity());
+            if (currentQuantity.compareTo(BigDecimal.ZERO) > 0) {
+                quantity = quantity.add(currentQuantity);
+                hasPositiveQuantity = true;
+            }
             amount = amount.add(line.amount() == null ? BigDecimal.ZERO : line.amount());
         }
 
@@ -338,10 +450,10 @@ public class ExcelBatchContractService {
             item.put("productName", productName);
             item.put("specification", specification);
             item.put("unit", unit);
-            item.put("quantity", quantityText(quantity, unit));
+            item.put("quantity", quantityText(hasPositiveQuantity ? quantity : BigDecimal.ONE, unit));
             item.put("taxRate", taxRate);
             item.put("amount", totalText(amount));
-            if (quantity.compareTo(BigDecimal.ZERO) > 0) {
+            if (hasPositiveQuantity && quantity.compareTo(BigDecimal.ZERO) > 0) {
                 item.put("unitPrice", amount.divide(quantity, 2, RoundingMode.HALF_UP).toPlainString());
             }
             return item;
@@ -349,7 +461,8 @@ public class ExcelBatchContractService {
     }
 
     private static BigDecimal quantity(String value) {
-        String number = value == null ? "" : value.replace(",", "").replaceAll("[^0-9.\\-]", "").trim();
+        String text = normalizeOptionalCell(value);
+        String number = text.replace(",", "").replaceAll("[^0-9.\\-]", "").trim();
         if (number.isBlank()) {
             return BigDecimal.ZERO;
         }
@@ -364,5 +477,29 @@ public class ExcelBatchContractService {
     private static String quantityText(BigDecimal quantity, String unit) {
         String text = quantity.stripTrailingZeros().toPlainString();
         return text + blankDefault(unit, "");
+    }
+
+    private static String quantityDisplayText(String quantity, String unit) {
+        BigDecimal value = quantity(quantity);
+        return quantityText(value.compareTo(BigDecimal.ZERO) > 0 ? value : BigDecimal.ONE, unit);
+    }
+
+    private static String safeZipFileName(String value) {
+        return value.replaceAll("[\\\\/:*?\"<>|]", "_");
+    }
+
+    private static String uniqueZipName(Set<String> usedNames, String name) {
+        if (usedNames.add(name)) {
+            return name;
+        }
+        int dot = name.lastIndexOf('.');
+        String prefix = dot > 0 ? name.substring(0, dot) : name;
+        String suffix = dot > 0 ? name.substring(dot) : "";
+        for (int i = 2; ; i++) {
+            String candidate = prefix + "-" + i + suffix;
+            if (usedNames.add(candidate)) {
+                return candidate;
+            }
+        }
     }
 }

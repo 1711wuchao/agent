@@ -14,8 +14,10 @@ import java.nio.file.Path;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Timestamp;
+import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.time.ZoneId;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
@@ -45,12 +47,7 @@ public class ContractService {
     @Transactional
     public ContractDraft createDraft(CreateContractDraftRequest request) {
         Map<String, Object> fields = request.fields() == null ? Map.of() : request.fields();
-        String id = contractNumberService.generateContractNumber(
-                contractNumberService.resolveSigningDate(
-                        fields.get("contractDate"),
-                        fields.get("invoiceDate")
-                )
-        );
+        String id = contractNumberService.generateContractNumber(resolveSigningDate(fields));
         jdbcTemplate.update(
                 """
                         INSERT INTO contract (contract_no, contract_type, template_code, title, status)
@@ -114,7 +111,7 @@ public class ContractService {
     @Transactional
     public Map<String, Object> generateDocx(String id) {
         ContractDraft draft = requireDraft(id);
-        String fileName = draft.id() + ".docx";
+        String fileName = contractDocxFileName(draft);
         Path filePath = Path.of(outputRoot, draft.id(), fileName);
         contractDocumentService.generateDocx(draft, filePath);
         recordFile(draft.id(), "DOCX", fileName, filePath);
@@ -164,6 +161,41 @@ public class ContractService {
     public Map<String, Object> reviewRisk(String id) {
         ContractDraft draft = requireDraft(id);
         return reviewRisk(draft.fields());
+    }
+
+    private static String contractDocxFileName(ContractDraft draft) {
+        Map<String, Object> fields = draft.fields();
+        String partyA = value(fields, "partyA", value(fields, "client", "甲方"));
+        String partyB = value(fields, "partyB", value(fields, "provider", "乙方"));
+        String directionLabel = value(fields, "contractDirectionLabel", "");
+        if (!directionLabel.isBlank()) {
+            String seller = value(fields, "seller", partyB);
+            String buyer = value(fields, "buyer", partyA);
+            String directionBaseName = safeFileName(directionLabel + "_" + seller + "_" + buyer);
+            if (!directionBaseName.isBlank()) {
+                return directionBaseName + "_" + draft.id() + ".docx";
+            }
+        }
+        String baseName = safeFileName(partyA + "_" + partyB);
+        if (baseName.isBlank() || "甲方_乙方".equals(baseName)) {
+            baseName = draft.id();
+        }
+        return baseName + "_" + draft.id() + ".docx";
+    }
+
+    private static String value(Map<String, Object> fields, String key, String fallback) {
+        Object value = fields.get(key);
+        if (value == null || String.valueOf(value).isBlank()) {
+            return fallback;
+        }
+        return String.valueOf(value).trim();
+    }
+
+    private static String safeFileName(String value) {
+        return value == null ? "" : value
+                .replaceAll("[\\\\/:*?\"<>|]", "_")
+                .replaceAll("\\s+", "")
+                .trim();
     }
 
     public Map<String, Object> reviewRisk(Map<String, Object> fields) {
@@ -247,6 +279,52 @@ public class ContractService {
                 code,
                 value == null ? null : String.valueOf(value)
         ));
+    }
+
+    private LocalDate resolveSigningDate(Map<String, Object> fields) {
+        if (isZhongcheng(fields) && !isTechnicalProduct(fields)) {
+            LocalDate invoiceDate = parseDate(fields.get("invoiceDate"));
+            if (invoiceDate != null) {
+                return ContractDocumentService.zhongchengSigningDate(invoiceDate);
+            }
+        }
+        return contractNumberService.resolveSigningDate(fields.get("contractDate"), fields.get("invoiceDate"));
+    }
+
+    private static boolean isZhongcheng(Map<String, Object> fields) {
+        return containsZhongcheng(fields.get("partyA"))
+                || containsZhongcheng(fields.get("partyB"))
+                || containsZhongcheng(fields.get("client"))
+                || containsZhongcheng(fields.get("provider"));
+    }
+
+    private static boolean containsZhongcheng(Object value) {
+        return value != null && String.valueOf(value).contains("中城");
+    }
+
+    private static boolean isTechnicalProduct(Map<String, Object> fields) {
+        if (Boolean.parseBoolean(value(fields, "containsTechnicalProduct", "false"))) {
+            return true;
+        }
+        String productName = value(fields, "productName", "");
+        return productName.contains("站点")
+                || productName.contains("软件")
+                || productName.contains("算法");
+    }
+
+    private static LocalDate parseDate(Object value) {
+        if (value == null || String.valueOf(value).isBlank()) {
+            return null;
+        }
+        String text = String.valueOf(value).trim();
+        if (text.length() >= 10) {
+            text = text.substring(0, 10);
+        }
+        try {
+            return LocalDate.parse(text);
+        } catch (DateTimeParseException ignored) {
+            return null;
+        }
     }
 
     private void recordFile(String contractNo, String fileType, String fileName, Path filePath) {

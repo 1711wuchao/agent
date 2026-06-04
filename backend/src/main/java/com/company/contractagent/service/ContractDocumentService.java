@@ -13,15 +13,23 @@ import org.apache.poi.xwpf.usermodel.XWPFRun;
 import org.apache.poi.xwpf.usermodel.XWPFTable;
 import org.apache.poi.xwpf.usermodel.XWPFTableCell;
 import org.apache.poi.xwpf.usermodel.XWPFTableRow;
+import org.openxmlformats.schemas.wordprocessingml.x2006.main.CTPPr;
+import org.openxmlformats.schemas.wordprocessingml.x2006.main.CTTabStop;
+import org.openxmlformats.schemas.wordprocessingml.x2006.main.CTTabs;
 import org.openxmlformats.schemas.wordprocessingml.x2006.main.CTTrPr;
+import org.openxmlformats.schemas.wordprocessingml.x2006.main.STTabJc;
 import org.springframework.stereotype.Service;
 
 import java.io.IOException;
 import java.io.OutputStream;
 import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.math.RoundingMode;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.LocalDate;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -36,6 +44,11 @@ import java.util.regex.Pattern;
 public class ContractDocumentService {
     private static final List<String> BANNED_WORDS = List.of("参考", "参考文献", "通用设备", "不含税金额", "税额");
     private static final String TECH_PROJECT_NAME = "本合同项下软硬件系统开发";
+    private static final DateTimeFormatter ISO_DATE = DateTimeFormatter.ISO_LOCAL_DATE;
+    private static final DateTimeFormatter CHINESE_DATE = DateTimeFormatter.ofPattern("yyyy年M月d日");
+    private static final String[] RMB_NUMBERS = {"零", "壹", "贰", "叁", "肆", "伍", "陆", "柒", "捌", "玖"};
+    private static final String[] RMB_UNITS = {"", "拾", "佰", "仟"};
+    private static final String[] RMB_GROUP_UNITS = {"", "万", "亿", "兆"};
     private final ObjectMapper objectMapper;
 
     public ContractDocumentService(ObjectMapper objectMapper) {
@@ -47,8 +60,14 @@ public class ContractDocumentService {
             Files.createDirectories(outputFile.getParent());
             try (XWPFDocument document = new XWPFDocument(); OutputStream outputStream = Files.newOutputStream(outputFile)) {
                 configureDocument(document);
-                if (isTechDevelopment(draft)) {
+                if (isIncomingChainContract(draft)) {
+                    buildIncomingChainPurchaseContract(document, draft);
+                } else if (isSalesChainContract(draft)) {
+                    buildZhongchengPurchaseContract(document, draft);
+                } else if (isTechDevelopment(draft)) {
                     buildTechDevelopmentContract(document, draft);
+                } else if (isZhongchengContract(draft)) {
+                    buildZhongchengPurchaseContract(document, draft);
                 } else {
                     buildPurchaseContract(document, draft);
                 }
@@ -77,8 +96,155 @@ public class ContractDocumentService {
         productTable(document, fields);
         clauseOnce(document, renderedClauses, PurchaseClauseVariantService.targetSummaryClause(fields, draft.id()));
         renderPurchaseVariantSections(document, fields, draft.id(), renderedClauses);
+        renderCustomRequirements(document, fields, "补充要求");
 
         commonEnding(document, fields, partyA, partyB);
+    }
+
+    private void buildIncomingChainPurchaseContract(XWPFDocument document, ContractDraft draft) {
+        Map<String, Object> fields = draft.fields();
+        String partyA = value(fields, "partyA", "甲方");
+        String partyB = value(fields, "partyB", "乙方");
+        String signingDate = zhongchengSigningDateText(fields);
+        String signingPlace = value(fields, "signingPlace", "苏州市吴江区");
+        String taxRate = value(fields, "taxRate", "13%");
+        BigDecimal total = totalAmount(contractItems(fields), fields);
+
+        title(document, "购 销 合 同");
+        blank(document);
+        clause(document, "买方：" + partyA + "（以下简称甲方）");
+        clause(document, "卖方：" + partyB + "（以下简称乙方）");
+        clause(document, "签订地点：" + signingPlace);
+        clause(document, "根据《中华人民共和国民法典》及国家有关法律、法规的规定，甲、乙双方在平等、自愿、等价有偿、公平、诚实信用的基础上，就甲方向乙方购买产品事项协商一致，特签订本合同，以资信守。");
+
+        heading(document, "第一条 标的名称、规格、单价、数量、金额、交货");
+        clause(document, "1.1 标的名称、型号规格、数量、金额见下表。");
+        chainProductTable(document, fields, false);
+        clause(document, "产品金额总计：人民币" + rmbUppercase(total) + "（大写），税率：" + taxRate + "，最终总价以发票为准。");
+        clause(document, "1.2 供货数量：本合同表格所列供货数量为合同约定数量；双方另有书面确认的，以实际确认的供货数量为准。");
+        clause(document, "1.3 交货时间和地点：乙方应于合同签订后150日内完成交货，并至少提前三个工作日通知甲方。");
+        clause(document, "1.4 除技术规格另有规定外，计量单位使用公制。");
+
+        heading(document, "第二条 知识产权及保密承诺");
+        clause(document, "2.1 乙方须保障甲方在使用该货物或其任何一部分时不受到第三方关于侵犯专利权、商标权或工业设计权等知识产权的指控。若第三方提出侵权主张，乙方应负责处理并承担因此产生的责任和费用。");
+        clause(document, "2.2 甲乙双方应保守合同签订、履行过程中知悉的商业秘密，不得向第三人公开、泄露或用于履行本合同以外的目的。");
+
+        heading(document, "第三条 结算方式和付款方式");
+        clause(document, "3.1 付款期限：甲方应于货物交付完成、验收无误且货权交割后60个工作日内完成全款支付，乙方应于甲方支付前提交合法合规的发票。");
+        clause(document, "3.2 付款方式：☑银行电汇  □银行承兑汇票。");
+
+        heading(document, "第四条 产品质量要求");
+        clause(document, "如甲方发现乙方交付的产品质量不符合本合同约定，应在收到货物之日起7日内向乙方提出书面异议并提供有关证明文件；乙方应及时回应并积极处理。");
+
+        heading(document, "第五条 双方责任及义务");
+        clause(document, "5.1 甲方责任：核实进场产品的品种、规格、数量是否与货物清单相符；按实际发货清单支付产品款；负责合同履行中的验收配合事项。");
+        clause(document, "5.2 乙方责任：保证产品质量达到甲方要求，并按甲方书面通知要求保质保量按时交付货物。");
+
+        heading(document, "第六条 验收方式");
+        clause(document, "产品到货后，由甲方按照双方约定的质量标准验收货物。若乙方未按甲方要求送货，甲方有权要求乙方补齐、调换、退货或退款，并由乙方承担因此给甲方造成的合理损失。");
+
+        heading(document, "第七条 合同终止");
+        clause(document, "7.1 因一方违约造成本合同不能履行或不能完全履行，守约方有权要求违约方限期纠正；违约方逾期不纠正的，守约方有权解除合同并追究违约责任。");
+        clause(document, "7.2 本合同已按约定履行完毕、双方协商一致终止或法律法规规定终止情形出现的，合同权利义务终止。");
+
+        heading(document, "第八条 争议的解决");
+        clause(document, "因本合同签订、履行而发生争议的，双方应友好协商；协商不成的，任何一方均可向甲方所在地有管辖权的人民法院提起诉讼。");
+
+        heading(document, "第九条 其他");
+        clause(document, "9.1 本合同未尽事宜，经双方友好协商，另行签署书面补充协议。补充协议与本合同具有同等法律效力。");
+        clause(document, "9.2 本合同经甲乙双方盖章后生效，一式贰份，甲乙双方各执壹份，具有同等法律效力。");
+        clause(document, "9.3 合同各方通讯地址改变的，应及时书面通知合同对方。");
+        clause(document, "9.4 本合同条款中的货币形式均为人民币。");
+        renderCustomRequirements(document, fields, "补充约定");
+
+        clause(document, "双方签章确认：");
+        renderSealPage(document, partyA, partyB, signingDate);
+    }
+
+    private void buildZhongchengPurchaseContract(XWPFDocument document, ContractDraft draft) {
+        Map<String, Object> fields = draft.fields();
+        String partyA = value(fields, "partyA", "甲方");
+        String partyB = value(fields, "partyB", "乙方");
+        boolean zhongcheng = isZhongchengContract(draft);
+        String signingDate = zhongchengSigningDateText(fields);
+        String signingPlace = value(fields, "signingPlace", "苏州市吴江区");
+        String taxRate = value(fields, "taxRate", "13%");
+        String freightBearer = partyB.contains("中城") ? "乙方" : partyA.contains("中城") ? "甲方" : "乙方";
+
+        title(document, "购 销 合 同");
+        blank(document);
+        clause(document, "甲  方（需方）：" + partyA);
+        clause(document, "乙  方（供方）：" + partyB);
+        clause(document, "签订日期：" + signingDate);
+        clause(document, "签订地点：" + signingPlace);
+        clause(document, "根据《中华人民共和国民法典》及相关法律法规的规定，为明确甲乙双方的权利和义务，甲乙双方遵循公平原则和诚实信用原则，双方协商一致，达成如下条款：");
+
+        heading(document, "一、释义（除非文本另有不同要求）");
+        clause(document, "1、文中“双方”指甲方和乙方，“一方”指甲方和乙方中的任何一方。");
+        clause(document, "2、文中所涉及费用均以人民币“元”为计量单位。");
+        clause(document, "3、文中“年、月、日”均指公历年、月、日。");
+
+        heading(document, "二、合同项目");
+        clause(document, "1、甲方向乙方购买电子设备、耗材。");
+        if (!zhongcheng) {
+            clause(document, "2、乙方向甲方免费提供商品相关的送货等服务。");
+        }
+
+        heading(document, "三、甲方向乙方购买商品名称、数量、价格等如下：");
+        chainProductTable(document, fields, zhongcheng);
+
+        BigDecimal total = totalAmount(contractItems(fields), fields);
+        heading(document, "四、合同价款");
+        clause(document, "1、供货价格");
+        clause(document, "产品金额总计：人民币" + rmbUppercase(total) + "（大写），税率：" + taxRate + "，最终总价以发票为准。");
+        clause(document, "2、本合同总价已包括货物移交至甲方所需的一切税费、运费、保险费等所有费用。");
+
+        heading(document, "五、付款结算");
+        clause(document, "1、付款期限：甲方应于货物交付完成验收无误且交割货物货权后60个工作日内完成全款支付，且乙方需于甲方支付前提交合法合规的发票，如有特殊情况，供需双方应以书面形式协商同意。");
+        clause(document, "2、付款方式：☑银行电汇  □银行承兑汇票");
+
+        heading(document, "六、包装及运输");
+        clause(document, "1、乙方负责将商品运送至甲方所指定地点。运输过程中，商品毁损、丢失的风险由乙方承担，运输及搬运费用由" + freightBearer + "承担。");
+        clause(document, "2、商品运送至甲方指定地点后，由甲乙双方共同对商品的表面特征如型号、数量、品牌等进行检验并办理相关商品移交手续。商品移交并经验收无误后，商品毁损、丢失的风险由甲方承担。");
+
+        heading(document, "七、交货地点、交货期限");
+        clause(document, "1、交货地点：甲方指定地点。");
+        clause(document, "2、交货时间：乙方应于合同签订后120日内完成交货，且提前2日向甲方沟通通知发货。");
+
+        heading(document, "八、保密承诺");
+        clause(document, "为有效规定甲乙双方的保密义务，甲乙双方自愿承诺保守合同签订相关所有商业秘密。甲乙双方对包括但不限于本合同及购销订单的有关事项以及通过本合同及购销订单所获知的对方相关事项进行保密，不得向第三人公开、泄露或用于履行本合同及购销订单以外的目的。");
+
+        heading(document, "九、质量保证");
+        clause(document, "1、乙方保证所提供所有商品为原厂商品，质量符合甲方规定的标准。如果商品质量与甲方规定标准不符，乙方应负责更换；如更换后仍不能达到甲方规定标准，甲方有权退货且相关费用由乙方承担。");
+        clause(document, "2、如因乙方提供的商品非人为原因或安装质量造成甲方损害的，由乙方承担责任和所有损失赔偿。");
+        clause(document, "3、如甲方发现乙方交付的产品质量不符合本合同规定，应在收到货物之日起7日内向乙方提出书面异议并提供有关证明文件，否则逾期无异议视为所交产品符合合同规定。乙方应立即回应并积极处理。");
+
+        heading(document, "十、售后、保修及其他服务");
+        clause(document, "1、自商品验收合格之日起，商品如有质量问题3个月内包退包换，12个月内包修，合同商品保修期及保修服务按照保修服务条款手册执行。");
+        clause(document, "2、保修期过后，如相关零件损坏，乙方可适当收取相应的零件费用。乙方在24小时内提供电话支持；如电话支持不能解决问题，乙方在48小时内到达现场进行故障排查，确定问题后做进一步处理。");
+        clause(document, "3、乙方应提供有效的联系人和联系电话，如有变更，乙方应及时、主动通知甲方。");
+
+        heading(document, "十一、合同的变更和解除");
+        clause(document, "1、除非遇到不可抗力因素导致本合同不能履行，未经甲乙双方一致书面同意，任何单方无权变更合同内容。");
+        clause(document, "2、对本合同的任何修改或补充，只有在双方授权代表签字盖章后生效，并成为本合同不可分割的组成部分，与本合同具有同等法律效力。");
+
+        heading(document, "十二、通知");
+        clause(document, "本合同中任何有效通知必须为书面形式。");
+
+        heading(document, "十三、争议解决和适用法律");
+        clause(document, "与本合同有关的或因执行本合同所产生之争议，应由双方友好协商解决；不能解决时，任何一方均可通过乙方所在地人民法院解决。");
+
+        heading(document, "十四、反贪污贿赂条款");
+        clause(document, "甲乙双方都清楚并愿意一致严格遵守中华人民共和国反贪污贿赂的法律规定，双方都清楚任何形式的贿赂和贪污行为都将触犯法律，任何一方违反规定都将受到法律严惩。");
+        clause(document, "甲方经办人或其他相关人员索要或接受合同约定外的明扣、暗扣、好处费、现金、有价证券、购物卡、实物、礼品、请吃、旅游等形式的不当利益，都是违反甲方公司制度和国家法律的行为，一经发现，应无条件接受甲方公司制度和国家法律的惩处。");
+        clause(document, "本条第二款所列示的利益如属于行业惯例或通常做法，必须在合同中载明将返还费用冲抵价款、降低合同价格或直接费用交给甲方。");
+
+        heading(document, "十五、其他");
+        clause(document, "本合同未尽事宜，应由甲、乙双方协商后以书面形式补充，加盖甲、乙双方公司印章后生效。");
+        renderCustomRequirements(document, fields, "补充约定", false);
+        clause(document, "本合同经甲乙双方盖章后生效，一式贰份，甲乙双方各执壹份，具有同等法律效力。");
+        clause(document, "（以下无正文）");
+        renderSealPage(document, partyA, partyB, signingDate);
     }
 
     private void buildTechDevelopmentContract(XWPFDocument document, ContractDraft draft) {
@@ -166,6 +332,7 @@ public class ContractDocumentService {
         clause(document, "2. 乙方未按约定完成开发、交付、部署、联调、整改或验收支持的，甲方有权要求乙方限期整改并承担相应违约责任。");
         clause(document, "3. 因乙方原因导致项目成果无法达到验收标准或无法正常使用的，乙方应继续整改并承担因此产生的合理损失。");
         techExtendedModules(document);
+        renderCustomRequirements(document, fields, "补充要求");
 
         commonEnding(document, fields, partyA, partyB);
     }
@@ -216,6 +383,28 @@ public class ContractDocumentService {
             return;
         }
         clause(document, text);
+    }
+
+    private void renderCustomRequirements(XWPFDocument document, Map<String, Object> fields, String title) {
+        renderCustomRequirements(document, fields, title, true);
+    }
+
+    private void renderCustomRequirements(XWPFDocument document, Map<String, Object> fields, String title, boolean standaloneHeading) {
+        String requirements = value(fields, "customRequirements", "");
+        if (requirements.isBlank()) {
+            return;
+        }
+        if (standaloneHeading) {
+            heading(document, title);
+        }
+        String[] lines = requirements.split("\\R+");
+        for (int i = 0; i < lines.length; i++) {
+            String line = sanitize(lines[i]);
+            if (line.isBlank()) {
+                continue;
+            }
+            clause(document, (standaloneHeading ? (i + 1) + ". " : title + "：") + line);
+        }
     }
 
     private void techExtendedModules(XWPFDocument document) {
@@ -288,16 +477,90 @@ public class ContractDocumentService {
         clause(document, "3. 本合同正文后为盖章页，盖章页不设置表格。");
         clause(document, "4. 本合同不设置法人签字页。");
 
+        renderSealPage(document, partyA, partyB, "____年__月__日");
+    }
+
+    private void renderSealPage(XWPFDocument document, String partyA, String partyB, String signingDate) {
         XWPFParagraph pageBreak = document.createParagraph();
         pageBreak.createRun().addBreak(BreakType.PAGE);
         title(document, "盖章页");
         blank(document);
-        clause(document, "甲方（盖章）：" + partyA);
+        blank(document);
+        sealTwoColumnLine(document, "甲方（盖章）：" + partyA, "乙方（盖章）：" + partyB, 320, 10);
         blank(document);
         blank(document);
-        clause(document, "乙方（盖章）：" + partyB);
         blank(document);
-        clause(document, "日期：        年     月     日");
+        sealTwoColumnLine(document, "签订日期：" + sealDateText(signingDate), "签订日期：" + sealDateText(signingDate), 120, 10);
+    }
+
+    private static void sealTwoColumnLine(XWPFDocument document, String leftText, String rightText, int spacingAfter) {
+        sealTwoColumnLine(document, leftText, rightText, spacingAfter, 11);
+    }
+
+    private static void sealTwoColumnLine(XWPFDocument document, String leftText, String rightText, int spacingAfter, int fontSize) {
+        XWPFParagraph paragraph = document.createParagraph();
+        paragraph.setAlignment(ParagraphAlignment.LEFT);
+        paragraph.setSpacingAfter(spacingAfter);
+        CTPPr pPr = paragraph.getCTP().isSetPPr() ? paragraph.getCTP().getPPr() : paragraph.getCTP().addNewPPr();
+        CTTabs tabs = pPr.isSetTabs() ? pPr.getTabs() : pPr.addNewTabs();
+        CTTabStop tabStop = tabs.addNewTab();
+        tabStop.setVal(STTabJc.LEFT);
+        tabStop.setPos(BigInteger.valueOf(5200));
+
+        XWPFRun run = paragraph.createRun();
+        run.setFontFamily("SimSun");
+        run.setFontSize(fontSize);
+        run.setText(sanitize(leftText));
+        run.addTab();
+        run.setText(sanitize(rightText));
+    }
+
+    private static String sealDateText(String signingDate) {
+        String text = sanitize(signingDate).trim();
+        if (text.isBlank() || text.matches(".*年\\s*月\\s*日.*")) {
+            return "____年__月__日";
+        }
+        return text;
+    }
+
+    private void zhongchengProductTable(XWPFDocument document, Map<String, Object> fields) {
+        chainProductTable(document, fields, true);
+    }
+
+    private void chainProductTable(XWPFDocument document, Map<String, Object> fields, boolean zhongchengCleanName) {
+        List<Map<String, Object>> items = contractItems(fields);
+        XWPFTable table = document.createTable(items.size() + 2, 6);
+        table.setWidth("100%");
+        table.setTableAlignment(TableRowAlign.CENTER);
+        applyTableBorders(table);
+        XWPFTableRow header = table.getRow(0);
+        repeatHeader(header);
+        setCell(header.getCell(0), "产品名称", true);
+        setCell(header.getCell(1), "规格/型号", true);
+        setCell(header.getCell(2), "单位", true);
+        setCell(header.getCell(3), "数量", true);
+        setCell(header.getCell(4), "总价(元)", true);
+        setCell(header.getCell(5), "备注", true);
+
+        for (int i = 0; i < items.size(); i++) {
+            Map<String, Object> item = items.get(i);
+            XWPFTableRow row = table.getRow(i + 1);
+            String productName = value(item, "productName", "合同产品");
+            setCell(row.getCell(0), zhongchengCleanName ? zhongchengProductName(productName) : sanitizeProductName(productName));
+            setCell(row.getCell(1), sanitize(value(item, "specification", "按双方确认规格执行")));
+            setCell(row.getCell(2), sanitize(value(item, "unit", "")));
+            setCell(row.getCell(3), zhongchengQuantityText(item));
+            setCell(row.getCell(4), amountPlainText(money(value(item, "amount", value(fields, "amount", value(fields, "fee", "0"))))));
+            setCell(row.getCell(5), "");
+        }
+
+        XWPFTableRow totalRow = table.getRow(items.size() + 1);
+        setCell(totalRow.getCell(0), "合计", true);
+        setCell(totalRow.getCell(1), "", true);
+        setCell(totalRow.getCell(2), "", true);
+        setCell(totalRow.getCell(3), "", true);
+        setCell(totalRow.getCell(4), amountPlainText(totalAmount(items, fields)), true);
+        setCell(totalRow.getCell(5), "", true);
     }
 
     private void productTable(XWPFDocument document, Map<String, Object> fields) {
@@ -491,10 +754,33 @@ public class ContractDocumentService {
         document.createParagraph().createRun().setText("");
     }
 
+    private static boolean isZhongchengContract(ContractDraft draft) {
+        Map<String, Object> fields = draft.fields();
+        return containsZhongcheng(value(fields, "partyA", ""))
+                || containsZhongcheng(value(fields, "partyB", ""))
+                || containsZhongcheng(value(fields, "client", ""))
+                || containsZhongcheng(value(fields, "provider", ""))
+                || containsZhongcheng(draft.title())
+                || containsZhongcheng(draft.contractType());
+    }
+
+    private static boolean isIncomingChainContract(ContractDraft draft) {
+        return "进项".equals(value(draft.fields(), "contractDirection", ""));
+    }
+
+    private static boolean isSalesChainContract(ContractDraft draft) {
+        return "销项".equals(value(draft.fields(), "contractDirection", ""));
+    }
+
+    private static boolean containsZhongcheng(String value) {
+        return value != null && value.contains("中城");
+    }
+
     private static boolean isTechDevelopment(ContractDraft draft) {
         String templateCode = draft.templateCode() == null ? "" : draft.templateCode().toUpperCase(Locale.ROOT);
         String productName = value(draft.fields(), "productName", "");
         return templateCode.contains("TECH")
+                || Boolean.parseBoolean(value(draft.fields(), "containsTechnicalProduct", "false"))
                 || productName.contains("站点")
                 || productName.contains("软件")
                 || productName.contains("算法");
@@ -540,6 +826,135 @@ public class ContractDocumentService {
 
     private static String amountText(BigDecimal value) {
         return value.setScale(2, RoundingMode.HALF_UP).toPlainString() + "元";
+    }
+
+    private static String amountPlainText(BigDecimal value) {
+        return value.setScale(2, RoundingMode.HALF_UP).toPlainString();
+    }
+
+    private static String zhongchengSigningDateText(Map<String, Object> fields) {
+        LocalDate explicit = parseIsoDate(fields.get("contractDate"));
+        if (explicit != null) {
+            return explicit.format(CHINESE_DATE);
+        }
+        LocalDate invoiceDate = parseIsoDate(fields.get("invoiceDate"));
+        if (invoiceDate == null) {
+            return LocalDate.now().format(CHINESE_DATE);
+        }
+        return zhongchengSigningDate(invoiceDate).format(CHINESE_DATE);
+    }
+
+    static LocalDate zhongchengSigningDate(LocalDate invoiceDate) {
+        return invoiceDate.minusMonths(1).withDayOfMonth(26);
+    }
+
+    private static LocalDate parseIsoDate(Object value) {
+        if (value == null || String.valueOf(value).isBlank()) {
+            return null;
+        }
+        String text = String.valueOf(value).trim();
+        if (text.length() >= 10) {
+            text = text.substring(0, 10);
+        }
+        try {
+            return LocalDate.parse(text, ISO_DATE);
+        } catch (DateTimeParseException ignored) {
+            return null;
+        }
+    }
+
+    private static String zhongchengProductName(String value) {
+        String result = sanitize(value)
+                .replaceAll("\\*[^*]+\\*", "")
+                .replace("通用设备", "")
+                .replace("软件", "系统")
+                .trim();
+        return result.isBlank() ? "合同产品" : result;
+    }
+
+    private static String zhongchengQuantityText(Map<String, Object> item) {
+        String quantity = sanitize(value(item, "quantity", "1"));
+        String unit = sanitize(value(item, "unit", ""));
+        if (!unit.isBlank() && quantity.endsWith(unit)) {
+            quantity = quantity.substring(0, quantity.length() - unit.length()).trim();
+        }
+        String numeric = quantity.replace(",", "").replaceAll("[^0-9.\\-]", "").trim();
+        if (!numeric.isBlank()) {
+            return new BigDecimal(numeric).stripTrailingZeros().toPlainString();
+        }
+        return quantity;
+    }
+
+    private static String rmbUppercase(BigDecimal amount) {
+        long cents = amount.setScale(2, RoundingMode.HALF_UP)
+                .movePointRight(2)
+                .abs()
+                .longValue();
+        long yuan = cents / 100;
+        int jiao = (int) ((cents / 10) % 10);
+        int fen = (int) (cents % 10);
+        StringBuilder result = new StringBuilder(integerRmb(yuan)).append("元");
+        if (jiao == 0 && fen == 0) {
+            return result.append("整").toString();
+        }
+        if (jiao > 0) {
+            result.append(RMB_NUMBERS[jiao]).append("角");
+        } else if (fen > 0) {
+            result.append("零");
+        }
+        if (fen > 0) {
+            result.append(RMB_NUMBERS[fen]).append("分");
+        }
+        return result.toString();
+    }
+
+    private static String integerRmb(long value) {
+        if (value == 0) {
+            return RMB_NUMBERS[0];
+        }
+        List<String> groups = new ArrayList<>();
+        while (value > 0) {
+            groups.add(groupRmb((int) (value % 10_000)));
+            value /= 10_000;
+        }
+        StringBuilder result = new StringBuilder();
+        boolean zeroPending = false;
+        for (int i = groups.size() - 1; i >= 0; i--) {
+            String group = groups.get(i);
+            if (group.isBlank()) {
+                zeroPending = result.length() > 0;
+                continue;
+            }
+            if (zeroPending && result.length() > 0 && !result.toString().endsWith("零")) {
+                result.append("零");
+            }
+            result.append(group).append(RMB_GROUP_UNITS[i]);
+            zeroPending = false;
+        }
+        return result.toString().replaceAll("零+$", "");
+    }
+
+    private static String groupRmb(int value) {
+        if (value == 0) {
+            return "";
+        }
+        StringBuilder result = new StringBuilder();
+        boolean zeroPending = false;
+        for (int unitIndex = 3; unitIndex >= 0; unitIndex--) {
+            int divisor = (int) Math.pow(10, unitIndex);
+            int number = value / divisor;
+            value %= divisor;
+            if (number == 0) {
+                zeroPending = result.length() > 0 && value > 0;
+                continue;
+            }
+            if (zeroPending) {
+                result.append("零");
+                zeroPending = false;
+            }
+            result.append(RMB_NUMBERS[number]).append(RMB_UNITS[unitIndex]);
+        }
+        return result.toString();
     }
 
     private static String sanitizeProductName(String value) {

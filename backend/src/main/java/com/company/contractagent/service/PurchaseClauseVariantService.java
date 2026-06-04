@@ -1,11 +1,17 @@
 package com.company.contractagent.service;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -19,6 +25,8 @@ import java.util.regex.Pattern;
  * 4. 仅调整不影响法律逻辑的条款表达与局部顺序。
  */
 public final class PurchaseClauseVariantService {
+    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
+
     private PurchaseClauseVariantService() {
     }
 
@@ -47,7 +55,7 @@ public final class PurchaseClauseVariantService {
 
     public static String targetSummaryClause(Map<String, Object> fields, String contractId) {
         Context context = Context.from(fields, contractId);
-        String product = context.productName().isBlank() ? "合同标的" : context.productName();
+        String product = context.productLabel().isBlank() ? "合同标的" : context.productLabel();
         return choose(List.of(
                 List.of("双方确认，本合同表格所列" + product + "的品名、规格型号、数量、税率和价税合计，是交付、验收及结算的直接依据；未写入本合同的口头说明不作为变更产品信息的依据。"),
                 List.of("本合同项下产品以第一条表格记载为准，甲方按表格中的规格型号、数量、税率和价税合计进行验收与结算，乙方交付内容应与该等记载保持一致。"),
@@ -216,11 +224,19 @@ public final class PurchaseClauseVariantService {
     );
 
     private static List<String> choose(List<List<String>> variants, Context context, String key) {
-        int index = Math.floorMod(Objects.hash(context.seed(), key), variants.size());
+        int index = Math.floorMod(Objects.hash(context.selectionSeed(key), key), variants.size());
         List<String> clauses = new ArrayList<>(variants.get(index));
         String productClause = productSpecificClause(context, key);
         if (!productClause.isBlank()) {
             clauses.add(productClause);
+        }
+        String amountClause = amountSpecificClause(context, key);
+        if (!amountClause.isBlank()) {
+            clauses.add(amountClause);
+        }
+        String companyClause = companySpecificClause(context, key);
+        if (!companyClause.isBlank()) {
+            clauses.add(companyClause);
         }
         return clauses;
     }
@@ -229,21 +245,69 @@ public final class PurchaseClauseVariantService {
         if (!"packaging".equals(key) && !"acceptance".equals(key) && !"warranty".equals(key)) {
             return "";
         }
-        String product = context.productName();
-        String haystack = (context.productName() + " " + context.specification()).toLowerCase(Locale.ROOT);
-        if (haystack.contains("无人机")) {
-            return "6. 涉及无人机或无人机配件的，乙方应注意防潮、防震和接口适配要求，避免因存放或运输环境影响飞控、供电或连接部件的稳定性。";
+        return switch (context.productCategory()) {
+            case "DRONE" -> switch (key) {
+                case "packaging" -> "6. 涉及无人机或无人机配件的，乙方应注意防潮、防震和接口适配要求，避免因存放或运输环境影响飞控、供电或连接部件的稳定性。";
+                case "acceptance" -> "6. 无人机相关产品验收时，甲方可重点核对机体结构、动力部件、飞控连接、载荷接口及随货资料是否满足合同列明规格。";
+                default -> "5. 无人机相关产品在质保期内出现飞控连接、动力输出或结构适配异常的，乙方应结合现场使用环境协助排查。";
+            };
+            case "POWER" -> switch (key) {
+                case "packaging" -> "6. 涉及供电、电源或电池相关产品的，乙方应保证绝缘、防潮、接口匹配和安全标识满足通常验收要求。";
+                case "acceptance" -> "6. 电源、电池或供电类产品验收时，甲方可对接口型号、绝缘状态、标识信息和基础供电稳定性进行核对。";
+                default -> "5. 供电类产品出现非甲方原因导致的异常发热、输出不稳或接口失效的，乙方应及时提供检测和处理意见。";
+            };
+            case "SENSOR_CONTROL" -> switch (key) {
+                case "packaging" -> "6. 涉及模块、控制或传感类产品的，乙方应保证接口、规格型号和基础运行状态能够支持甲方现场安装和验收。";
+                case "acceptance" -> "6. 控制、传感或模块类产品应重点核对接口定义、型号标识、基础响应状态和配套资料，确保能够接入甲方现场系统。";
+                default -> "5. 控制、传感或模块类产品在使用中出现识别异常、接口异常或响应异常的，乙方应配合甲方完成原因定位。";
+            };
+            case "ROBOT" -> switch (key) {
+                case "packaging" -> "6. 涉及机器人或执行机构的，乙方应做好关节、轮组、支撑结构和外露连接件的运输防护，避免装卸过程造成偏移或损伤。";
+                case "acceptance" -> "6. 机器人类产品验收可围绕结构完整性、运动部件、控制响应、随货附件和基础运行状态进行核对。";
+                default -> "5. 机器人类产品出现运动异常、执行部件卡滞或控制响应异常的，乙方应提供排查建议并配合处理。";
+            };
+            case "OPTICAL" -> switch (key) {
+                case "packaging" -> "6. 涉及相机、云台、雷达或成像部件的，乙方应采取防震、防尘和镜面保护措施，避免运输中影响光学或感知性能。";
+                case "acceptance" -> "6. 光电、雷达或成像类产品验收时，甲方可核对外观、镜面状态、接口、型号标识和基础成像或探测功能。";
+                default -> "5. 光电或感知类产品出现成像异常、探测异常或云台动作异常的，乙方应协助甲方判断是否属于产品质量问题。";
+            };
+            default -> context.highAmount()
+                    ? "6. 鉴于本合同标的金额较高，乙方应在交付前完成必要的出厂核对，并确保" + context.productLabel() + "与合同约定保持一致。"
+                    : "";
+        };
+    }
+
+    private static String amountSpecificClause(Context context, String key) {
+        if ("payment".equals(key)) {
+            return switch (context.amountBucket()) {
+                case "LOW" -> "6. 合同金额较小的，双方可在资料齐备后集中办理验收确认、开票和付款流程，提高结算效率。";
+                case "MID" -> "6. 双方应围绕交付批次、验收资料和发票信息做好节点核对，确保付款进度与合同履行情况匹配。";
+                default -> "6. 鉴于合同金额较高，乙方提交付款资料时应同步提供产品明细、交付记录和验收依据，便于甲方完成内部审核。";
+            };
         }
-        if (haystack.contains("电源") || haystack.contains("电池") || haystack.contains("供电")) {
-            return "6. 涉及供电、电源或电池相关产品的，乙方应保证绝缘、防潮、接口匹配和安全标识满足通常验收要求。";
-        }
-        if (haystack.contains("传感") || haystack.contains("模块") || haystack.contains("控制")) {
-            return "6. 涉及模块、控制或传感类产品的，乙方应保证接口、规格型号和基础运行状态能够支持甲方现场安装和验收。";
-        }
-        if (!product.isBlank() && context.highAmount()) {
-            return "6. 鉴于本合同标的金额较高，乙方应在交付前完成必要的出厂核对，并确保" + product + "与合同约定保持一致。";
+        if ("liability".equals(key) && context.highAmount()) {
+            return "4. 对金额较高且影响甲方项目进度的交付问题，违约方应优先采取补交、替换、加急整改等方式降低损失扩大。";
         }
         return "";
+    }
+
+    private static String companySpecificClause(Context context, String key) {
+        if (!"changeForce".equals(key) && !"liability".equals(key)) {
+            return "";
+        }
+        int index = Math.floorMod(context.companySeed(), 3);
+        if ("changeForce".equals(key)) {
+            return switch (index) {
+                case 0 -> "4. 双方业务联系人发生变化的，应及时通知对方；未及时通知导致的信息延误，由未通知方自行承担相应影响。";
+                case 1 -> "4. 涉及交付计划调整的，双方应以书面、邮件或双方确认的工作记录作为后续执行依据。";
+                default -> "4. 合同履行中的补充确认应围绕产品范围、交付时间、验收资料和结算节点展开，不得与本合同主要条款相冲突。";
+            };
+        }
+        return switch (index) {
+            case 0 -> "4. 因一方内部流程、人员交接或资料传递不及时影响履约的，该方应及时纠正并承担由此产生的合理影响。";
+            case 1 -> "4. 守约方为减少损失而采取合理措施产生的必要费用，可根据违约原因由责任方承担。";
+            default -> "4. 违约责任的处理应结合合同金额、影响范围、整改进度和双方配合情况综合确定。";
+        };
     }
 
     private static String value(Map<String, Object> fields, String key, String fallback) {
@@ -254,19 +318,135 @@ public final class PurchaseClauseVariantService {
         return String.valueOf(value).trim();
     }
 
-    private record Context(String contractId, String partyA, String partyB, String productName, String specification,
-                           String amountBucket, boolean highAmount, int seed) {
+    private record Context(
+            String contractId,
+            String partyA,
+            String partyB,
+            String productName,
+            String specification,
+            String productLabel,
+            String productCategory,
+            String amountBucket,
+            boolean highAmount,
+            int seed,
+            int companySeed,
+            int productSeed,
+            int amountSeed
+    ) {
         static Context from(Map<String, Object> fields, String contractId) {
             String partyA = value(fields, "partyA", "");
             String partyB = value(fields, "partyB", "");
-            String productName = value(fields, "productName", "");
-            String specification = value(fields, "specification", "");
+            ProductProfile productProfile = ProductProfile.from(fields);
+            String productName = productProfile.primaryProduct();
+            String specification = productProfile.primarySpecification();
             BigDecimal amount = parseAmount(value(fields, "amount", "0"));
             boolean highAmount = amount.compareTo(BigDecimal.valueOf(500_000)) >= 0;
             String amountBucket = amount.compareTo(BigDecimal.valueOf(100_000)) < 0 ? "LOW"
                     : highAmount ? "HIGH" : "MID";
-            int seed = Objects.hash(contractId, partyA, partyB, productName, specification, amountBucket);
-            return new Context(contractId, partyA, partyB, productName, specification, amountBucket, highAmount, seed);
+            int companySeed = Objects.hash(partyA, partyB);
+            int productSeed = Objects.hash(productProfile.category(), productProfile.catalogText(), productProfile.specificationText());
+            int amountSeed = Objects.hash(amountBucket, amount.setScale(0, RoundingMode.HALF_UP).toPlainString());
+            int seed = Objects.hash(companySeed, productSeed, amountSeed);
+            return new Context(
+                    contractId,
+                    partyA,
+                    partyB,
+                    productName,
+                    specification,
+                    productProfile.label(),
+                    productProfile.category(),
+                    amountBucket,
+                    highAmount,
+                    seed,
+                    companySeed,
+                    productSeed,
+                    amountSeed
+            );
+        }
+
+        int selectionSeed(String key) {
+            return switch (key) {
+                case "packaging", "acceptance", "warranty", "target" -> Objects.hash(productSeed, companySeed);
+                case "payment" -> Objects.hash(amountSeed, companySeed);
+                case "changeForce" -> Objects.hash(companySeed, amountBucket);
+                case "liability" -> Objects.hash(companySeed, productSeed, amountBucket);
+                default -> seed;
+            };
+        }
+    }
+
+    private record ProductProfile(
+            String primaryProduct,
+            String primarySpecification,
+            String label,
+            String category,
+            String catalogText,
+            String specificationText
+    ) {
+        static ProductProfile from(Map<String, Object> fields) {
+            Set<String> products = new LinkedHashSet<>();
+            Set<String> specifications = new LinkedHashSet<>();
+            collectItemValues(fields, products, specifications);
+
+            String fallbackProduct = value(fields, "productName", "");
+            String fallbackSpecification = value(fields, "specification", "");
+            if (products.isEmpty() && !fallbackProduct.isBlank() && !"多项合同标的".equals(fallbackProduct)) {
+                products.add(fallbackProduct);
+            }
+            if (specifications.isEmpty() && !fallbackSpecification.isBlank() && !"详见合同标的表".equals(fallbackSpecification)) {
+                specifications.add(fallbackSpecification);
+            }
+
+            String primaryProduct = products.stream().findFirst().orElse(fallbackProduct);
+            String primarySpecification = specifications.stream().findFirst().orElse(fallbackSpecification);
+            String catalogText = String.join("、", products);
+            String specificationText = String.join("、", specifications);
+            String label = products.isEmpty() ? fallbackProduct : products.stream().limit(3).reduce((a, b) -> a + "、" + b).orElse("");
+            String category = detectCategory(catalogText + " " + specificationText + " " + fallbackProduct + " " + fallbackSpecification);
+            return new ProductProfile(primaryProduct, primarySpecification, label, category, catalogText, specificationText);
+        }
+
+        private static void collectItemValues(Map<String, Object> fields, Set<String> products, Set<String> specifications) {
+            String itemsJson = value(fields, "itemsJson", "");
+            if (itemsJson.isBlank()) {
+                return;
+            }
+            try {
+                List<Map<String, Object>> items = OBJECT_MAPPER.readValue(itemsJson, new TypeReference<>() {
+                });
+                for (Map<String, Object> item : items) {
+                    String product = value(item, "productName", "");
+                    String specification = value(item, "specification", "");
+                    if (!product.isBlank()) {
+                        products.add(product);
+                    }
+                    if (!specification.isBlank()) {
+                        specifications.add(specification);
+                    }
+                }
+            } catch (Exception ignored) {
+                // itemsJson 只是用于增强变体选择，解析失败时回退到普通字段。
+            }
+        }
+
+        private static String detectCategory(String text) {
+            String haystack = text.toLowerCase(Locale.ROOT);
+            if (haystack.contains("无人机") || haystack.contains("飞控") || haystack.contains("机体") || haystack.contains("图传")) {
+                return "DRONE";
+            }
+            if (haystack.contains("电源") || haystack.contains("电池") || haystack.contains("供电") || haystack.contains("充电")) {
+                return "POWER";
+            }
+            if (haystack.contains("传感") || haystack.contains("模块") || haystack.contains("控制") || haystack.contains("主板")) {
+                return "SENSOR_CONTROL";
+            }
+            if (haystack.contains("机器人") || haystack.contains("机器狗") || haystack.contains("舵轮") || haystack.contains("关节")) {
+                return "ROBOT";
+            }
+            if (haystack.contains("相机") || haystack.contains("云台") || haystack.contains("雷达") || haystack.contains("成像")) {
+                return "OPTICAL";
+            }
+            return "GENERAL";
         }
     }
 
